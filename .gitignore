@@ -1,0 +1,10 @@
+processed/
+uploads/
+.claude
+__pycache__
+
+*.pyc
+happycolor.md
+todo.md
+describe.md
+pictures.json

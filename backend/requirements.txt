@@ -1,0 +1,10 @@
+flask
+flask-cors
+opencv-python
+numpy
+pillow
+scikit-learn
+scikit-image
+openai
+requests
+volcengine-python-sdk[ark]
