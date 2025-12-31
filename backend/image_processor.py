@@ -48,15 +48,23 @@ class ImageProcessor:
     def _generate_lineart_from_original(self) -> np.ndarray:
         """使用边缘检测从原图生成线稿"""
         gray = cv2.cvtColor(self.img, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
 
-        # 1. 双边滤波去噪同时保留边缘
-        denoised = cv2.bilateralFilter(gray, 9, 75, 75)
-
-        # 2. 计算梯度幅值（Sobel算子）
-        grad_x = cv2.Sobel(denoised, cv2.CV_64F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(denoised, cv2.CV_64F, 0, 1, ksize=3)
-        gradient = np.sqrt(grad_x**2 + grad_y**2)
-        gradient = (gradient / gradient.max() * 255).astype(np.uint8)
+        # 根据图片尺寸选择滤波策略
+        if max(h, w) > 1024:
+            # 大图片：使用高斯模糊（性能优先，约10倍提升）
+            denoised = cv2.GaussianBlur(gray, (5, 5), 0)
+            grad_x = cv2.Sobel(denoised, cv2.CV_16S, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(denoised, cv2.CV_16S, 0, 1, ksize=3)
+            gradient = cv2.addWeighted(cv2.convertScaleAbs(grad_x), 0.5,
+                                       cv2.convertScaleAbs(grad_y), 0.5, 0)
+        else:
+            # 一般图片：保留原有双边滤波机制（质量优先）
+            denoised = cv2.bilateralFilter(gray, 9, 75, 75)
+            grad_x = cv2.Sobel(denoised, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(denoised, cv2.CV_64F, 0, 1, ksize=3)
+            gradient = np.sqrt(grad_x**2 + grad_y**2)
+            gradient = (gradient / gradient.max() * 255).astype(np.uint8)
 
         # 3. 使用Otsu自动阈值
         _, edges = cv2.threshold(gradient, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -123,27 +131,25 @@ class ImageProcessor:
         """将小区域合并到相邻的最大区域（跨越边缘）"""
         labels = labels.copy()
 
-        # 计算每个区域的像素数
-        region_sizes = {}
-        for i in range(1, num_labels):
-            size = np.sum(labels == i)
-            if size > 0:
-                region_sizes[i] = size
+        # 使用bincount快速计算每个区域的像素数（比循环快很多）
+        region_sizes = np.bincount(labels.ravel(), minlength=num_labels)
 
-        # 按大小排序，从最小的开始合并
-        small_regions = sorted(
-            [(i, size) for i, size in region_sizes.items() if size < min_size],
-            key=lambda x: x[1]
-        )
+        # 找出所有小区域并按大小排序
+        small_ids = np.where((region_sizes > 0) & (region_sizes < min_size))[0]
+        small_ids = small_ids[small_ids > 0]  # 排除背景
+        small_ids = small_ids[np.argsort(region_sizes[small_ids])]
 
-        for small_id, _ in small_regions:
-            if region_sizes.get(small_id, 0) == 0:
+        # 预创建膨胀核（避免重复创建）
+        dilate_kernel = np.ones((7, 7), np.uint8)
+
+        for small_id in small_ids:
+            if region_sizes[small_id] == 0:
                 continue
 
             region_mask = labels == small_id
 
             # 使用较大的膨胀核来跨越边缘找到相邻区域
-            dilated = cv2.dilate(region_mask.astype(np.uint8), np.ones((7, 7), np.uint8))
+            dilated = cv2.dilate(region_mask.astype(np.uint8), dilate_kernel)
             neighbor_mask = (dilated > 0) & ~region_mask
 
             neighbor_ids = labels[neighbor_mask]
@@ -153,12 +159,12 @@ class ImageProcessor:
                 continue
 
             # 选择最大的相邻区域
-            unique_neighbors, counts = np.unique(neighbor_ids, return_counts=True)
-            best_neighbor = unique_neighbors[np.argmax([region_sizes.get(n, 0) for n in unique_neighbors])]
+            unique_neighbors = np.unique(neighbor_ids)
+            best_neighbor = unique_neighbors[np.argmax(region_sizes[unique_neighbors])]
 
             # 合并
             labels[region_mask] = best_neighbor
-            region_sizes[best_neighbor] = region_sizes.get(best_neighbor, 0) + region_sizes[small_id]
+            region_sizes[best_neighbor] += region_sizes[small_id]
             region_sizes[small_id] = 0
 
         return labels
